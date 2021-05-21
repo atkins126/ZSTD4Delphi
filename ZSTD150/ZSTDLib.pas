@@ -3,17 +3,46 @@ unit ZSTDLib;
 interface
 const
   ZSTD_VERSION_MAJOR = 1;
-  ZSTD_VERSION_MINOR = 4;
-  ZSTD_VERSION_RELEASE = 8;
+  ZSTD_VERSION_MINOR = 5;
+  ZSTD_VERSION_RELEASE = 0;
   ZSTD_VERSION_NUMBER = ZSTD_VERSION_MAJOR*100*100+ZSTD_VERSION_MINOR*100+
     ZSTD_VERSION_RELEASE;
-  ZSTD_VERSION_STRING = '1.4.8';
+  ZSTD_VERSION_STRING = '1.5.0';
   ZSTD_CLEVEL_DEFAULT = 3;
-
+  ZSTD_REP_NUM = 3;
 type
-  ZSTD_CCtx=Pointer;
-  ZSTD_DCtx=Pointer;
-  ZSTD_strategy=(
+  ZSTD_ErrorCode=(
+    ZSTD_error_no_error = 0,
+    ZSTD_error_GENERIC  = 1,
+    ZSTD_error_prefix_unknown                = 10,
+    ZSTD_error_version_unsupported           = 12,
+    ZSTD_error_frameParameter_unsupported    = 14,
+    ZSTD_error_frameParameter_windowTooLarge = 16,
+    ZSTD_error_corruption_detected = 20,
+    ZSTD_error_checksum_wrong      = 22,
+    ZSTD_error_dictionary_corrupted      = 30,
+    ZSTD_error_dictionary_wrong          = 32,
+    ZSTD_error_dictionaryCreation_failed = 34,
+    ZSTD_error_parameter_unsupported   = 40,
+    ZSTD_error_parameter_outOfBound    = 42,
+    ZSTD_error_tableLog_tooLarge       = 44,
+    ZSTD_error_maxSymbolValue_tooLarge = 46,
+    ZSTD_error_maxSymbolValue_tooSmall = 48,
+    ZSTD_error_stage_wrong       = 60,
+    ZSTD_error_init_missing      = 62,
+    ZSTD_error_memory_allocation = 64,
+    ZSTD_error_workSpace_tooSmall= 66,
+    ZSTD_error_dstSize_tooSmall = 70,
+    ZSTD_error_srcSize_wrong    = 72,
+    ZSTD_error_dstBuffer_null   = 74,
+    // following error codes are __NOT STABLE__, they can be removed or changed in future versions */
+    ZSTD_error_frameIndex_tooLarge = 100,
+    ZSTD_error_seekableIO          = 102,
+    ZSTD_error_dstBuffer_wrong     = 104,
+    ZSTD_error_srcBuffer_wrong     = 105,
+    ZSTD_error_maxCode = 120  // never EVER use this value directly, it can change in future versions! Use ZSTD_isError() instead */
+  );
+  ZSTD_strategy = (
                ZSTD_fast=1,
                ZSTD_dfast=2,
                ZSTD_greedy=3,
@@ -24,6 +53,68 @@ type
                ZSTD_btultra=8,
                ZSTD_btultra2=9
   );
+  ZSTD_OptPrice_e=(
+    zop_dynamic=0, zop_predef
+  );
+  ZSTD_literalCompressionMode_e =(
+    ZSTD_lcm_auto = 0,          {**< Automatically determine the compression mode based on the compression level.
+                                 *   Negative compression levels will be uncompressed, and positive compression
+                                 *   levels will be compressed. */}
+    ZSTD_lcm_huffman = 1,       {**< Always attempt Huffman compression. Uncompressed literals will still be
+                                 *   emitted if Huffman compression is not profitable. */}
+    ZSTD_lcm_uncompressed = 2   {**< Always emit uncompressed literals. */}
+  );
+  optState_t = record
+    //* All tables are allocated inside cctx->workspace by ZSTD_resetCCtx_internal() */
+    litFreq : Pointer;           //* table of literals statistics, of size 256 */
+    litLengthFreq : Pointer;     //* table of litLength statistics, of size (MaxLL+1) */
+    matchLengthFreq : Pointer;   //* table of matchLength statistics, of size (MaxML+1) */
+    offCodeFreq : Pointer;       //* table of offCode statistics, of size (MaxOff+1) */
+    matchTable : Pointer;        //* list of found matches, of size ZSTD_OPT_NUM+1 */
+    priceTable : Pointer;        //* All positions tracked by optimal parser, of size ZSTD_OPT_NUM+1 */
+
+    litSum : Cardinal;                 //* nb of literals */
+    litLengthSum : Cardinal;           //* nb of litLength codes */
+    matchLengthSum : Cardinal;         //* nb of matchLength codes */
+    offCodeSum : Cardinal;             //* nb of offset codes */
+    litSumBasePrice : Cardinal;        //* to compare to log2(litfreq) */
+    litLengthSumBasePrice : Cardinal;  //* to compare to log2(llfreq)  */
+    matchLengthSumBasePrice : Cardinal;//* to compare to log2(mlfreq)  */
+    offCodeSumBasePrice : Cardinal;    //* to compare to log2(offreq)  */
+    priceType : ZSTD_OptPrice_e;       //* prices can be determined dynamically, or follow a pre-defined cost structure */
+    symbolCosts : Pointer;             //* pre-calculated dictionary statistics */
+    literalCompressionMode : ZSTD_literalCompressionMode_e
+  end;
+  ZSTD_window_t = record
+    nextSrc : Pointer;    //* next block here to continue on current prefix */
+    base : Pointer;       //* All regular indexes relative to this position */
+    dictBase : Pointer;   //* extDict indexes relative to this position */
+    dictLimit : Cardinal; //* below that point, need extDict */
+    lowLimit : Cardinal;  //* below that point, no more valid data */
+  end;
+  ZSTD_dictMode_e = (
+    ZSTD_noDict = 0,
+    ZSTD_extDict = 1,
+    ZSTD_dictMatchState = 2,
+    ZSTD_dedicatedDictSearch = 3
+  );
+  ZSTD_allocFunction = function(opaque : Pointer; size : NativeInt):Pointer{$IFDEF WIN32};cdecl{$ENDIF};
+  ZSTD_freeFunction = procedure(opaque,address : Pointer){$IFDEF WIN32};cdecl{$ENDIF};
+  ZSTD_customMem = record
+    customAlloc : ZSTD_allocFunction;
+    customFree :  ZSTD_freeFunction;
+    opaque : Pointer;
+  end;
+  BlockCompressorRepArr = array[0..ZSTD_REP_NUM-1] of Cardinal;
+  {//ZSTD_blockCompressor ZSTD_selectBlockCompressor(ZSTD_strategy strat, ZSTD_dictMode_e dictMode);
+  typedef size_t (*ZSTD_blockCompressor) (
+        ZSTD_matchState_t* bs, seqStore_t* seqStore, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t srcSize);
+  }
+  ZSTD_blockCompressor =  function(bs,seqStore:Pointer; rep:BlockCompressorRepArr;
+    src : Pointer; srcSize : NativeInt):NativeInt{$IFDEF WIN32};cdecl{$ENDIF};
+  ZSTD_CCtx=Pointer;
+  ZSTD_DCtx=Pointer;
   ZSTD_cParameter=(
     {* compression parameters
      * Note: When compressing with a ZSTD_CDict these parameters are superseded
@@ -236,6 +327,35 @@ type
   ZSTD_DDict = Pointer;
 
 {$IFDEF WIN32}
+function ERR_getErrorString(code : ZSTD_ErrorCode):PAnsiChar; inline;
+procedure ZSTD_customFree(ptr : Pointer; customMem : ZSTD_customMem); inline;
+function ZSTD_customMalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  inline;
+function ZSTD_customCalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  inline;
+function ZSTD_selectBlockCompressor(strat:ZSTD_strategy; dictMode: ZSTD_dictMode_e)
+  : ZSTD_blockCompressor; inline;
+procedure ZSTD_resetSeqStore(ssPtr : Pointer);inline;
+function ZSTD_fseBitCost(const ctable,count : Pointer; const max : Cardinal):NativeInt;
+  inline;
+function ZSTD_crossEntropyCost(const norm :Pointer; accuracyLog :Cardinal; const
+  count : Pointer; const max : Cardinal):NativeInt; inline;
+procedure ZSTD_seqToCodes(const seqStorePtr : Pointer);inline;
+function HIST_count_wksp(count,maxSymbolValuePtr,src: Pointer; srcsize:NativeInt;
+  workSpace : Pointer; workSpaceSize:NativeInt):NativeInt; inline;
+function ZSTD_noCompressLiterals(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; inline;
+function ZSTD_compressRleLiteralsBlock(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; inline;
+function FSE_readNCount_bmi2(normalizedCounter,maxSymbolValuePtr,tableLogPtr :
+  Pointer; const rBuffer:Pointer; rBuffSize:NativeInt; bmi2:integer):NativeInt;
+  inline;
+function ZSTD_getErrorCode(functionResult : NativeInt):ZSTD_ErrorCode; inline;
+function ZSTD_loadDEntropy(entropy : Pointer; const dict : Pointer; const
+  dictSize : NativeInt):NativeInt; inline;
+function HUF_readStats_wksp(huffWeight:Pointer; hwSize:NativeInt; rankStats,
+  nbSymbolsPtr, tableLogPtr:Pointer; const src:Pointer; srcSize:NativeInt;
+  workspace:Pointer; wkspSize:NativeInt; bmi2:integer):NativeInt; inline;
 function ZSTD_versionNumber:Cardinal; inline;
 function ZSTD_versionString:PAnsiChar; inline;
 function ZSTD_compress(dst:Pointer; dstCapacity : NativeInt; src:Pointer;
@@ -338,7 +458,41 @@ function ZSTD_sizeof_CStream(const zcs:ZSTD_CStream):NativeInt; inline;
 function ZSTD_sizeof_DStream(const zds:ZSTD_DStream):NativeInt; inline;
 function ZSTD_sizeof_CDict(const cdict:ZSTD_CDict):NativeInt; inline;
 function ZSTD_sizeof_DDict(const ddict:ZSTD_DDict):NativeInt; inline;
+function ZSTD_buildBlockEntropyStats(seqStorePtr:Pointer;const prevEntropy:
+  Pointer; nextEntropy:Pointer;const cctxParams:Pointer;entropyMetadata,
+  workspace:Pointer;wkspSize:NativeInt):NativeInt; inline;
 
+function _ERR_getErrorString(code : ZSTD_ErrorCode):PAnsiChar; cdecl; external;
+procedure _ZSTD_customFree(ptr : Pointer; customMem : ZSTD_customMem); cdecl;
+  external;
+function _ZSTD_customMalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  cdecl; external;
+function _ZSTD_customCalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  cdecl; external;
+function _ZSTD_selectBlockCompressor(strat:ZSTD_strategy; dictMode: ZSTD_dictMode_e)
+  : ZSTD_blockCompressor; cdecl; external;
+procedure _ZSTD_resetSeqStore(ssPtr : Pointer); cdecl; external;
+function _ZSTD_fseBitCost(const ctable,count : Pointer; const max : Cardinal):NativeInt;
+  cdecl; external;
+function _ZSTD_crossEntropyCost(const norm :Pointer; accuracyLog :Cardinal; const
+  count : Pointer; const max : Cardinal):NativeInt; cdecl; external;
+procedure _ZSTD_seqToCodes(const seqStorePtr : Pointer); cdecl; external;
+function _HIST_count_wksp(count,maxSymbolValuePtr,src: Pointer; srcsize:NativeInt;
+  workSpace : Pointer; workSpaceSize:NativeInt):NativeInt; cdecl; external;
+function _ZSTD_noCompressLiterals(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; cdecl; external;
+function _ZSTD_compressRleLiteralsBlock(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; cdecl; external;
+function _FSE_readNCount_bmi2(normalizedCounter,maxSymbolValuePtr,tableLogPtr :
+  Pointer; const rBuffer:Pointer; rBuffSize:NativeInt; bmi2:integer):NativeInt;
+  cdecl; external;
+function _ZSTD_getErrorCode(functionResult : NativeInt):ZSTD_ErrorCode; cdecl;
+  external;
+function _ZSTD_loadDEntropy(entropy : Pointer; const dict : Pointer; const
+  dictSize : NativeInt):NativeInt; external;
+function _HUF_readStats_wksp(huffWeight:Pointer; hwSize:NativeInt; rankStats,
+  nbSymbolsPtr, tableLogPtr:Pointer; const src:Pointer; srcSize:NativeInt;
+  workspace:Pointer; wkspSize:NativeInt; bmi2:integer):NativeInt; external;
 function _ZSTD_versionNumber:Cardinal; cdecl; external;
 function _ZSTD_versionString:PAnsiChar; cdecl; external;
 function _ZSTD_compress(dst:Pointer; dstCapacity : NativeInt; src:Pointer;
@@ -442,8 +596,40 @@ function _ZSTD_sizeof_CStream(const zcs:ZSTD_CStream):NativeInt; cdecl; external
 function _ZSTD_sizeof_DStream(const zds:ZSTD_DStream):NativeInt; cdecl; external;
 function _ZSTD_sizeof_CDict(const cdict:ZSTD_CDict):NativeInt; cdecl; external;
 function _ZSTD_sizeof_DDict(const ddict:ZSTD_DDict):NativeInt; cdecl; external;
+function _ZSTD_buildBlockEntropyStats(seqStorePtr:Pointer;const prevEntropy:
+  Pointer; nextEntropy:Pointer;const cctxParams:Pointer;entropyMetadata,
+  workspace:Pointer;wkspSize:NativeInt):NativeInt; cdecl; external;
 {$ELSEIF DEFINED(WIN64)}
 //ZSTDLIB_API unsigned ZSTD_versionNumber(void);
+function ERR_getErrorString(code : ZSTD_ErrorCode):PAnsiChar; external;
+procedure ZSTD_customFree(ptr : Pointer; customMem : ZSTD_customMem); external;
+function ZSTD_customMalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  external;
+function ZSTD_customCalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  external;
+function ZSTD_selectBlockCompressor(strat:ZSTD_strategy; dictMode: ZSTD_dictMode_e)
+  : ZSTD_blockCompressor; external;
+procedure ZSTD_resetSeqStore(ssPtr : Pointer); external;
+function ZSTD_fseBitCost(const ctable,count : Pointer; const max : Cardinal):NativeInt;
+  external;
+function ZSTD_crossEntropyCost(const norm :Pointer; accuracyLog :Cardinal; const
+  count : Pointer; const max : Cardinal):NativeInt; external;
+procedure ZSTD_seqToCodes(const seqStorePtr : Pointer);external;
+function HIST_count_wksp(count,maxSymbolValuePtr,src: Pointer; srcsize:NativeInt;
+  workSpace : Pointer; workSpaceSize:NativeInt):NativeInt; external;
+function ZSTD_noCompressLiterals(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; external;
+function ZSTD_compressRleLiteralsBlock(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; external;
+function FSE_readNCount_bmi2(normalizedCounter,maxSymbolValuePtr,tableLogPtr :
+  Pointer; const rBuffer:Pointer; rBuffSize:NativeInt; bmi2:integer):NativeInt;
+  external;
+function ZSTD_getErrorCode(functionResult : NativeInt):ZSTD_ErrorCode; external;
+function ZSTD_loadDEntropy(entropy : Pointer; const dict : Pointer; const
+  dictSize : NativeInt):NativeInt; external;
+function HUF_readStats_wksp(huffWeight:Pointer; hwSize:NativeInt; rankStats,
+  nbSymbolsPtr, tableLogPtr:Pointer; const src:Pointer; srcSize:NativeInt;
+  workspace:Pointer; wkspSize:NativeInt; bmi2:integer):NativeInt; external;
 function ZSTD_versionNumber:Cardinal; external;
 function ZSTD_versionString:PAnsiChar; external;
 function ZSTD_compress(dst:Pointer; dstCapacity : NativeInt; src:Pointer;
@@ -546,7 +732,42 @@ function ZSTD_sizeof_CStream(const zcs:ZSTD_CStream):NativeInt; external;
 function ZSTD_sizeof_DStream(const zds:ZSTD_DStream):NativeInt; external;
 function ZSTD_sizeof_CDict(const cdict:ZSTD_CDict):NativeInt; external;
 function ZSTD_sizeof_DDict(const ddict:ZSTD_DDict):NativeInt; external;
+function ZSTD_buildBlockEntropyStats(seqStorePtr:Pointer; const prevEntropy:
+  Pointer; nextEntropy:Pointer;const cctxParams:Pointer; entropyMetadata,
+  workspace:Pointer;wkspSize:NativeInt):NativeInt; external;
 {$ELSE}
+function ERR_getErrorString(code : ZSTD_ErrorCode):PAnsiChar; external 'libzstd.a';
+procedure ZSTD_customFree(ptr : Pointer; customMem : ZSTD_customMem); external
+  'libzstd.a';
+function ZSTD_customMalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  external 'libzstd.a';
+function ZSTD_customCalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  external 'libzstd.a';
+function ZSTD_selectBlockCompressor(strat:ZSTD_strategy; dictMode: ZSTD_dictMode_e)
+  : ZSTD_blockCompressor; external 'libzstd.a';
+procedure ZSTD_resetSeqStore(ssPtr : Pointer); external 'libzstd.a';
+function ZSTD_fseBitCost(const ctable,count : Pointer; const max : Cardinal):NativeInt;
+  external 'libzstd.a';
+function ZSTD_crossEntropyCost(const norm :Pointer; accuracyLog :Cardinal; const
+  count : Pointer; const max : Cardinal):NativeInt; external 'libzstd.a';
+procedure ZSTD_seqToCodes(const seqStorePtr : Pointer); external 'libzstd.a';
+function HIST_count_wksp(count,maxSymbolValuePtr,src: Pointer; srcsize:NativeInt;
+  workSpace : Pointer; workSpaceSize:NativeInt):NativeInt; external 'libzstd.a';
+function ZSTD_noCompressLiterals(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; external 'libzstd.a';
+function ZSTD_compressRleLiteralsBlock(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; external 'libzstd.a';
+function FSE_readNCount_bmi2(normalizedCounter,maxSymbolValuePtr,tableLogPtr :
+  Pointer; const rBuffer:Pointer; rBuffSize:NativeInt; bmi2:integer):NativeInt;
+  external 'libzstd.a';
+function ZSTD_getErrorCode(functionResult : NativeInt):ZSTD_ErrorCode; external
+  'libzstd.a';
+function ZSTD_loadDEntropy(entropy : Pointer; const dict : Pointer; const
+  dictSize : NativeInt):NativeInt; external 'libzstd.a';
+function HUF_readStats_wksp(huffWeight:Pointer; hwSize:NativeInt; rankStats,
+  nbSymbolsPtr, tableLogPtr:Pointer; const src:Pointer; srcSize:NativeInt;
+  workspace:Pointer; wkspSize:NativeInt; bmi2:integer):NativeInt; external
+  'libzstd.a';
 function ZSTD_versionNumber:Cardinal; external 'libzstd.a';
 function ZSTD_versionString:PAnsiChar; external 'libzstd.a';
 function ZSTD_compress(dst:Pointer; dstCapacity : NativeInt; src:Pointer;
@@ -649,11 +870,89 @@ function ZSTD_sizeof_CStream(const zcs:ZSTD_CStream):NativeInt; external 'libzst
 function ZSTD_sizeof_DStream(const zds:ZSTD_DStream):NativeInt; external 'libzstd.a';
 function ZSTD_sizeof_CDict(const cdict:ZSTD_CDict):NativeInt; external 'libzstd.a';
 function ZSTD_sizeof_DDict(const ddict:ZSTD_DDict):NativeInt; external 'libzstd.a';
+function ZSTD_buildBlockEntropyStats(seqStorePtr:Pointer;const prevEntropy:
+  Pointer; nextEntropy:Pointer;const cctxParams:Pointer;entropyMetadata,
+  workspace:Pointer;wkspSize:NativeInt):NativeInt; external 'libzstd.a';
 {$ENDIF}
 implementation
 uses libc;
+
 {$IFDEF WIN32}
-{$L ZSTD148.X86.O}
+{$L error_private.x86.o}
+{$L zstd_common.x86.o}
+{$L zstd_compress.x86.o}
+{$L zstd_ldm.x86.o}
+{$L zstd_double_fast.x86.o}
+{$L zstd_fast.x86.o}
+{$L zstd_opt.x86.o}
+{$L zstd_lazy.x86.o}
+{$L xxhash.x86.o}
+{$L zstd_compress_literals.x86.o}
+{$L hist.x86.o}
+{$L zstd_compress_sequences.x86.o}
+{$L zstd_compress_superblock.x86.o}
+{$L huf_compress.x86.o}
+{$L entropy_common.x86.o}
+{$L fse_compress.x86.o}
+{$L fse_decompress.x86.o}
+{$L zstd_decompress.x86.o}
+{$L zstd_ddict.x86.o}
+{$L zstd_decompress_block.x86.o}
+{$L huf_decompress.x86.o}
+function ERR_getErrorString(code : ZSTD_ErrorCode):PAnsiChar; inline;
+begin Result := _ERR_getErrorString(code); end;
+procedure ZSTD_customFree(ptr : Pointer; customMem : ZSTD_customMem); inline;
+begin _ZSTD_customFree(ptr,customMem); end;
+function ZSTD_customMalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  inline;
+begin Result := _ZSTD_customMalloc(size,customMem); end;
+function ZSTD_customCalloc(size : NativeInt; customMem : ZSTD_customMem): Pointer;
+  inline;
+begin Result := _ZSTD_customCalloc(size,customMem); end;
+function ZSTD_selectBlockCompressor(strat:ZSTD_strategy; dictMode: ZSTD_dictMode_e)
+  : ZSTD_blockCompressor; inline;
+begin Result := _ZSTD_selectBlockCompressor(strat,dictMode);end;
+procedure ZSTD_resetSeqStore(ssPtr : Pointer);inline;
+begin _ZSTD_resetSeqStore(ssPtr) end;
+function ZSTD_fseBitCost(const ctable,count : Pointer; const max : Cardinal):NativeInt;
+  inline;
+begin Result := _ZSTD_fseBitCost(ctable,count,max) end;
+function ZSTD_crossEntropyCost(const norm :Pointer; accuracyLog :Cardinal; const
+  count : Pointer; const max : Cardinal):NativeInt; inline;
+begin Result := _ZSTD_crossEntropyCost(norm,accuracyLog,count,max) end;
+procedure ZSTD_seqToCodes(const seqStorePtr : Pointer);inline;
+begin _ZSTD_seqToCodes(seqStorePtr) end;
+function HIST_count_wksp(count,maxSymbolValuePtr,src: Pointer; srcsize:NativeInt;
+  workSpace : Pointer; workSpaceSize:NativeInt):NativeInt; inline;
+begin
+  Result := _HIST_count_wksp(count,maxSymbolValuePtr,src,srcsize,workSpace,
+    workSpaceSize)
+end;
+function ZSTD_noCompressLiterals(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; inline;
+begin Result := _ZSTD_noCompressLiterals(dst,dstCapacity,src,srcsize) end;
+function ZSTD_compressRleLiteralsBlock(dst:Pointer; dstCapacity:NativeInt; const src :
+  Pointer; srcsize : NativeInt):NativeInt; inline;
+begin Result := _ZSTD_compressRleLiteralsBlock(dst,dstCapacity,src,srcsize) end;
+function FSE_readNCount_bmi2(normalizedCounter,maxSymbolValuePtr,tableLogPtr :
+  Pointer; const rBuffer:Pointer; rBuffSize:NativeInt; bmi2:integer):NativeInt;
+  inline;
+begin
+  Result := _FSE_readNCount_bmi2(normalizedCounter,maxSymbolValuePtr,tableLogPtr,
+    rBuffer, rBuffSize, bmi2)
+end;
+function ZSTD_getErrorCode(functionResult : NativeInt):ZSTD_ErrorCode; inline;
+begin Result := _ZSTD_getErrorCode(functionResult) end;
+function ZSTD_loadDEntropy(entropy : Pointer; const dict : Pointer; const
+  dictSize : NativeInt):NativeInt; inline;
+begin Result := _ZSTD_loadDEntropy(entropy,dict,dictSize) end;
+function HUF_readStats_wksp(huffWeight:Pointer; hwSize:NativeInt; rankStats,
+  nbSymbolsPtr, tableLogPtr:Pointer; const src:Pointer; srcSize:NativeInt;
+  workspace:Pointer; wkspSize:NativeInt; bmi2:integer):NativeInt; inline;
+begin
+  Result := _HUF_readStats_wksp(huffWeight,hwSize,rankStats,nbSymbolsPtr,tableLogPtr,
+    src,srcSize,workspace,wkspSize,bmi2);
+end;
 function ZSTD_versionNumber:Cardinal; inline;
 begin Result := _ZSTD_versionNumber; end;
 function ZSTD_versionString:PAnsiChar; inline;
@@ -820,11 +1119,37 @@ function ZSTD_sizeof_CDict(const cdict:ZSTD_CDict):NativeInt; inline;
 begin Result:=_ZSTD_sizeof_CDict(cdict);end;
 function ZSTD_sizeof_DDict(const ddict:ZSTD_DDict):NativeInt; inline;
 begin Result:=_ZSTD_sizeof_DDict(ddict);end;
+function ZSTD_buildBlockEntropyStats(seqStorePtr:Pointer;const prevEntropy:
+  Pointer; nextEntropy:Pointer;const cctxParams:Pointer;entropyMetadata,
+  workspace:Pointer;wkspSize:NativeInt):NativeInt; inline;
+begin Result:=ZSTD_buildBlockEntropyStats(cctxParams,prevEntropy,nextEntropy,
+  cctxParams,entropyMetadata,workspace,wkspSize); end;
 {$ENDIF}
 {$IFDEF WIN64}
-{$L ZSTD148.X64.O}
+{$L error_private.x64.o}
+{$L zstd_common.x64.o}
+{$L zstd_compress.x64.o}
+{$L zstd_ldm.x64.o}
+{$L zstd_double_fast.x64.o}
+{$L zstd_fast.x64.o}
+{$L zstd_opt.x64.o}
+{$L zstd_lazy.x64.o}
+{$L xxhash.x64.o}
+{$L zstd_compress_literals.x64.o}
+{$L hist.x64.o}
+{$L zstd_compress_sequences.x64.o}
+{$L zstd_compress_superblock.x64.o}
+{$L huf_compress.x64.o}
+{$L entropy_common.x64.o}
+{$L fse_compress.x64.o}
+{$L fse_decompress.x64.o}
+{$L zstd_decompress.x64.o}
+{$L zstd_ddict.x64.o}
+{$L zstd_decompress_block.x64.o}
+{$L huf_decompress.x64.o}
 {$ENDIF}
 end.
+
 
 
 
